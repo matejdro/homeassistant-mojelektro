@@ -13,14 +13,10 @@ DOMAIN = 'mojelektro'
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(minutes=15)
 
-CONF_USERNAME = 'username'
-CONF_PASSWORD = 'password'
 CONF_METER_ID = 'meter_id'
 
 ACCOUNT_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
         vol.Required(CONF_METER_ID): cv.string
     }
 )
@@ -28,20 +24,23 @@ ACCOUNT_SCHEMA = vol.Schema(
 CONFIG_SCHEMA = vol.Schema({DOMAIN: ACCOUNT_SCHEMA}, extra=vol.ALLOW_EXTRA)
 
 def setup(hass, config):
+    _LOGGER.info("SETUP...")
     """Your controller/hub specific code."""
     # Data that you want to share with your platforms
     hass.data[DOMAIN] = {  }
 
     conf = config.get(DOMAIN)
 
-    api = MojElektroApi(conf.get(CONF_USERNAME), conf.get(CONF_PASSWORD), conf.get(CONF_METER_ID))
-    
+    api = MojElektroApi(conf.get(CONF_METER_ID))
+
     hass.helpers.discovery.load_platform('sensor', DOMAIN, conf, config)
 
     def refresh(event_time):
         """Refresh"""
         _LOGGER.debug("Refreshing...")
         hass.data[DOMAIN] = api.getData()
+
+    refresh(0)
 
     track_time_interval(hass, refresh, SCAN_INTERVAL)
 

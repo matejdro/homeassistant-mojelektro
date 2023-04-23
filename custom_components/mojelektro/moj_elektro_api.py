@@ -1,3 +1,5 @@
+import html
+
 import requests
 import logging
 from datetime import datetime, timedelta
@@ -8,21 +10,15 @@ _LOGGER = logging.getLogger(__name__)
 DIR = os.path.dirname(os.path.realpath(__file__))
 
 class MojElektroApi:
-
-    username = None
-    password = None
     meter_id = None
 
     session = requests.Session()
-    csrf = None
     token = None
 
     cache = None
     cacheDate = None
 
-    def __init__(self, username, password, meter_id): 
-        self.username = username
-        self.password = password
+    def __init__(self, meter_id):
         self.meter_id = meter_id
 
     def updateOauthToken(self):
@@ -31,72 +27,52 @@ class MojElektroApi:
             return
 
         try:
-            self.initRekonoSession()
-            self.rekonoLogin()
-            self.confirmWithCert()
+            base_page = self.session.get(
+                "https://mojelektro.si/Saml2/OIDC/authorization?response_type=code&client_id=uP84hZERa2bA&state=&redirect_uri=https://mojelektro.si&scope=openid email SIPASS name phone",
+            )
+            base_page.raise_for_status()
+
+            url_text = re.compile('action="([^"]+)"').search(base_page.text).group(1)
+            session_id = re.compile('name="sessionId" type="hidden" value="([^"]+)"').search(base_page.text).group(1)
+
+            data = {"sessionId": session_id, "identificationMechanism": 6}
+            cert_login_page = self.session.post(f"https://sicas.gov.si{url_text}", data=data,
+                                                cert=(DIR + '/crt.pem', DIR + '/key.pem'))
+            cert_login_page.raise_for_status()
+
+            session_id = re.compile('name="sessionId" type="hidden" value="([^"]+)"').search(
+                cert_login_page.text).group(1)
+            hidden_fields = re.compile('<input type="hidden" name="([^"]+)" value="([^"]+)"').findall(
+                cert_login_page.text)
+            hidden_fields = {e[0]: e[1] for e in hidden_fields}
+            hidden_fields["sessionId"] = session_id
+
+            confirm_page = self.session.post("https://sicas.gov.si/bl/confirmAttributes", data=hidden_fields)
+            confirm_page.raise_for_status()
+            url_text = re.compile('action="([^"]+)"').search(confirm_page.text).group(1)
+            hidden_fields = re.compile('<input type="hidden" name="([^"]+)" value="([^"]+)"').findall(confirm_page.text)
+            hidden_fields = {e[0]: e[1] for e in hidden_fields}
+
+            moj_elektro_logged_in_landing = self.session.post(html.unescape(url_text), data=hidden_fields,
+                                                              allow_redirects=False)
+            moj_elektro_logged_in_landing.raise_for_status()
+
+            code = re.compile('code=(.+)').search(moj_elektro_logged_in_landing.headers["Location"]).group(1)
+
+            payload = {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "https://mojelektro.si",
+                "client_id": "uP84hZERa2bA",
+                "client_secret": "Ked3FKMWTaCxKbDZ9y5B85X"
+            }
+
+            moj_elektro_token_response = self.session.post('https://mojelektro.si/OIDC/token', data=payload,
+                                                           auth=(payload["client_id"], payload["client_secret"]))
+            self.token = moj_elektro_token_response.json()["access_token"]
         except Exception as err_msg:
-            _LOGGER.error("Error! %s", err_msg)
+            _LOGGER.error("Auth Error! %s", err_msg)
             raise
-
-    def initRekonoSession(self):
-        response = self.session.get("https://idp.rekono.si/openid-connect-server-webapp/authorize?response_type=code&client_id=SEDMPWEB&state=&redirect_uri=https%3A%2F%2Fmojelektro.si&scope=address%20phone%20openid%20profile%20email%20http%3A%2F%2Fidp.rekono.si%2Fopenid%2Ftaxnumber")
-
-        assert response.status_code == 200
-
-        _LOGGER.debug("JSession: " + self.session.cookies.get('JSESSIONID', path='/IdP-RM-Front'))
-        _LOGGER.debug("Init redirect url: " + response.url)
-
-        csrfSearch = re.search(r'_csrf.*value=\"([a-z0-9\-]*)\"', response.text)
-
-        self.csrf = csrfSearch.group(1)
-    
-    def rekonoLogin(self):        
-        payload = {"_csrf": self.csrf, "doaction": "doaction", "username": self.username, "password": self.password}
-
-        response = self.session.post('https://idp.rekono.si/IdP-RM-Front/chooselogin/rekono.htm', data=payload)
-
-        assert response.status_code == 200
-
-    def confirmWithCert(self):
-        payload = {"_csrf": self.csrf, "mode": "certlogin"}
-        response = self.session.post('https://idp.rekono.si/IdP-RM-Front/chooselogin/options.htm', 
-            allow_redirects=False,
-            data=payload
-        )
-        assert response.status_code == 302
-
-
-        certRes = requests.Session().get('https://idp.rekono.si/IdP-RM-Front/certlogin.htm', 
-            cert=(DIR + '/crt.pem', DIR + '/key.pem'), 
-            cookies = {'JSESSIONID': self.session.cookies.get('JSESSIONID', path='/IdP-RM-Front')}
-        )
-
-        assert certRes.status_code == 200
-        token = re.search(r'token.*value=\"([a-z0-9\-]*)\"', certRes.text).group(1)
-        
-        
-        response = self.session.get('https://idp.rekono.si/openid-connect-server-webapp/callback?token=' + token)
-        
-        assert response.status_code == 200
-
-        #https://mojelektro.si?code=PKaKA6uPOpEU7Xryrx8255sGP83Hv3fG&state=
-        code = re.search(r'code\=(.*?)&', response.url).group(1)
-
-
-        payload = {
-            "grant_type":"authorization_code",
-            "code": code, 
-            "redirect_uri": "https://mojelektro.si",
-            "client_id": "SEDMPWEB",
-            "client_secret": "deacJn54-nQsjmfTvQ5As5odBs51docg8NUc6KxL4iSDhoOMIqv25BhP3xM8vlLidjfKr6bsTj9j12M3dJ2wuw"
-        }
-
-        response = self.session.post('https://idp.rekono.si/openid-connect-server-webapp/token', data=payload)
-        assert response.status_code == 200
-        
-        self.token = response.json()['access_token']
-        _LOGGER.debug("Generted token: " + self.token)
-
 
     def get15MinIntervalData(self):
         self.updateOauthToken()
