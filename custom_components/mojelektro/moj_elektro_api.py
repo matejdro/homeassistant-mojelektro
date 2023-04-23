@@ -2,9 +2,11 @@ import html
 
 import requests
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import re
+
+from homeassistant.components import recorder
 
 _LOGGER = logging.getLogger(__name__)
 DIR = os.path.dirname(os.path.realpath(__file__))
@@ -81,95 +83,41 @@ class MojElektroApi:
         dateTo = datetime.now().strftime("%Y-%m-%dT00:00:00")
 
         _LOGGER.debug("15min interval request range: " + dateFrom + " - " + dateTo)
-        
-        r=requests.get(f'https://api.mojelektro.si/NmcApiStoritve/nmc/v1/merilnamesta/{self.meter_id}/odbirki/15min', 
-            headers={"authorization": ("Bearer " + self.token)},
-            params={"datumCasOd": dateFrom, "datumCasDo": dateTo, "flat": "true"}
-        )
+
+        r = requests.get(
+            f'https://api.mojelektro.si/NmcApiStoritveV2/nmc/v1/merilnamesta/{self.meter_id}/odbirki/15min2',
+            headers={"Authorization": ("Bearer " + self.token)},
+            params={"datumCasOd": dateFrom, "datumCasDo": dateTo, "ponudnikOzn": "SIPASS", "flat": "true"}
+            )
+
         assert r.json()['success'] == True
 
         # [{'datum': '2021-02-24T09:30:00+01:00', 'A+': 0, 'A-': 0.825},... ]
 
         return r.json()['data']
 
-    def getMeterData(self):
-        self.updateOauthToken()
-
-        dateFrom = (datetime.now()).strftime("%Y-%m-%dT00:00:00")
-        dateTo = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
-
-        _LOGGER.debug("Meter state request range: " + dateFrom + " - " + dateTo)
-        
-        r=requests.get(f'https://api.mojelektro.si/NmcApiStoritve/nmc/v1/merilnamesta/{self.meter_id}/odbirki/dnevnaStanja', 
-            headers={"authorization": ("Bearer " + self.token)},
-            params={"datumCasOd": dateFrom, "datumCasDo": dateTo, "flat": "true"}
-        )
-        assert r.json()['success'] == True
-        assert len(r.json()['data']) > 0
-
-        # [{ "datum": "2021-02-28T00:00:00+01:00", 
-        # "PREJETA DELOVNA ENERGIJA ET": 2562, "PREJETA DELOVNA ENERGIJA VT": 1072, "PREJETA DELOVNA ENERGIJA MT": 1490, 
-        # "ODDANA DELOVNA ENERGIJA ET": 588, "ODDANA DELOVNA ENERGIJA VT": 410, "ODDANA DELOVNA ENERGIJA MT": 178 },... ]
-
-        return r.json()['data']
-
-
-    def getDailyData(self):
-        self.updateOauthToken()
-
-        dateFrom = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
-        dateTo = datetime.now().strftime("%Y-%m-%dT00:00:00")
-
-        _LOGGER.debug("Daily state request range: " + dateFrom + " - " + dateTo)
-
-        r=requests.get(f'https://api.mojelektro.si/NmcApiStoritve/nmc/v1/merilnamesta/{self.meter_id}/odbirki/dnevnaPoraba', 
-            headers={"authorization": ("Bearer " + self.token)},
-            params={"datumCasOd": dateFrom, "datumCasDo": dateTo, "flat": "true"}
-        )
-
-        assert r.json()['success'] == True
-
-        # [{"datum":"2021-02-26T00:00:00+01:00",
-        # "PREJETA DELOVNA ENERGIJA ET":14.94,"PREJETA DELOVNA ENERGIJA VT":8.47,"PREJETA DELOVNA ENERGIJA MT":6.47,
-        # "ODDANA DELOVNA ENERGIJA ET":28.56,"ODDANA DELOVNA ENERGIJA VT":28.56,"ODDANA DELOVNA ENERGIJA MT":0.00}, ...]
-
-        return r.json()['data']
-    
-
     def getData(self):
         cache = self.getCache()
 
-        dMeter = cache.get("meter")[0]
-        dDaily = cache.get("daily")[0]
-        d15 = cache.get("15")[self.get15MinOffset()]
+        all_d15_data = cache.get("15")
+
+        recordings = all_d15_data["meritve"]
+        now = datetime.now(timezone.utc) - timedelta(days=1)
+        sorted_recordings = sorted(recordings, key=lambda r: (datetime.fromisoformat(r["datum"]) - now).seconds, reverse=True)
+        closest = sorted_recordings[0]["registri"]
+
 
         return {
-            "15min_input": d15['A+'], 
-            "15min_output": d15['A-'],
-
-            "meter_input": dMeter['PREJETA DELOVNA ENERGIJA ET'],
-            "meter_input_peak": dMeter['PREJETA DELOVNA ENERGIJA VT'],
-            "meter_input_offpeak": dMeter['PREJETA DELOVNA ENERGIJA MT'],
-            "meter_output": dMeter['ODDANA DELOVNA ENERGIJA ET'],
-            "meter_output_peak": dMeter['ODDANA DELOVNA ENERGIJA VT'],
-            "meter_output_offpeak": dMeter['ODDANA DELOVNA ENERGIJA MT'],
-
-            "daily_input": dDaily['PREJETA DELOVNA ENERGIJA ET'],
-            "daily_input_peak": dDaily['PREJETA DELOVNA ENERGIJA VT'],
-            "daily_input_offpeak": dDaily['PREJETA DELOVNA ENERGIJA MT'],
-            "daily_output": dDaily['ODDANA DELOVNA ENERGIJA ET'],
-            "daily_output_peak": dDaily['ODDANA DELOVNA ENERGIJA VT'],
-            "daily_output_offpeak": dDaily['ODDANA DELOVNA ENERGIJA MT']
+            "15min_input": closest['1003'],
+            "15min_output": closest['1004'],
         }
 
     def getCache(self):
         _LOGGER.debug("Rerfresing cache")
-        
+
         if self.cache is None or self.cacheDate != datetime.today().date():
             self.cache = {
-                "meter": self.getMeterData(), 
-                "daily": self.getDailyData(),
-                "15" : self.get15MinIntervalData()
+                "15": self.get15MinIntervalData()
             }
             self.cacheDate = datetime.today().date()
 
@@ -178,18 +126,16 @@ class MojElektroApi:
     def get15MinOffset(self):
         now = datetime.now()
 
-        return int((now.hour * 60 + now.minute)/15) 
-
+        return int((now.hour * 60 + now.minute) / 15)
 
     def isTokenValid(self):
         if self.token is None:
             return False
 
-        #TODO: validate JWT token
-        r = requests.get("https://api.mojelektro.si/NmcApiStoritve/nmc/v1/user/info", 
-            headers={"authorization":"Bearer " + self.token})
-        
+        # TODO: validate JWT token
+        r = requests.get("https://api.mojelektro.si/NmcApiStoritve/nmc/v1/user/info",
+                         headers={"authorization": "Bearer " + self.token})
+
         _LOGGER.debug(f'Validation response {r.status_code}')
 
         return r.status_code != 401
-        
