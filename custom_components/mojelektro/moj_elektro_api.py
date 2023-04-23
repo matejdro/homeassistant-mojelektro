@@ -1,15 +1,17 @@
 import html
-
-import requests
 import logging
-from datetime import datetime, timedelta, timezone
 import os
 import re
+from datetime import datetime, timedelta
 
+import requests
 from homeassistant.components import recorder
+from homeassistant.components.recorder.db_schema import Statistics
+from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 
 _LOGGER = logging.getLogger(__name__)
 DIR = os.path.dirname(os.path.realpath(__file__))
+
 
 class MojElektroApi:
     meter_id = None
@@ -20,8 +22,9 @@ class MojElektroApi:
     cache = None
     cacheDate = None
 
-    def __init__(self, meter_id):
+    def __init__(self, meter_id, hass):
         self.meter_id = meter_id
+        self.recorder = recorder.get_instance(hass)
 
     def updateOauthToken(self):
         if self.isTokenValid():
@@ -88,29 +91,46 @@ class MojElektroApi:
             f'https://api.mojelektro.si/NmcApiStoritveV2/nmc/v1/merilnamesta/{self.meter_id}/odbirki/15min2',
             headers={"Authorization": ("Bearer " + self.token)},
             params={"datumCasOd": dateFrom, "datumCasDo": dateTo, "ponudnikOzn": "SIPASS", "flat": "true"}
-            )
+        )
 
         assert r.json()['success'] == True
 
-        # [{'datum': '2021-02-24T09:30:00+01:00', 'A+': 0, 'A-': 0.825},... ]
-
         return r.json()['data']
 
-    def getData(self):
+    def updateData(self):
         cache = self.getCache()
 
         all_d15_data = cache.get("15")
-
         recordings = all_d15_data["meritve"]
-        now = datetime.now(timezone.utc) - timedelta(days=1)
-        sorted_recordings = sorted(recordings, key=lambda r: (datetime.fromisoformat(r["datum"]) - now).seconds, reverse=True)
-        closest = sorted_recordings[0]["registri"]
 
+        self.import_statistics("1003", "sensor.elektro_power_use", recordings, "Porabljena energija iz omrežja")
+        self.import_statistics("1004", "sensor.elektro_power_return", recordings, "Vrnjena energija v omrežje")
 
-        return {
-            "15min_input": closest['1003'],
-            "15min_output": closest['1004'],
-        }
+    def import_statistics(self, api_data_key, id, recordings, name):
+        sum = 0
+        new_data = []
+        last_reset = datetime.fromisoformat(recordings[0]["datum"])
+
+        for recording in recordings:
+            date = datetime.fromisoformat(recording["datum"])
+            values = recording["registri"]
+            value = values[api_data_key]
+            sum = sum + value
+
+            new_data.append(StatisticData(start=date, state=value, sum=sum, last_reset=last_reset))
+
+        self.recorder.async_import_statistics(
+            StatisticMetaData(
+                name=name,
+                statistic_id=id,
+                has_mean=False,
+                has_sum=True,
+                unit_of_measurement="kWh",
+                source="recorder"
+            ),
+            new_data,
+            Statistics
+        )
 
     def getCache(self):
         _LOGGER.debug("Rerfresing cache")

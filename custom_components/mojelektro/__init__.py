@@ -3,6 +3,7 @@ import voluptuous as vol
 from datetime import timedelta
 
 import homeassistant.helpers.config_validation as cv
+from homeassistant.components.recorder.statistics import statistic_during_period
 from homeassistant.helpers.event import track_time_interval
 
 from .moj_elektro_api import MojElektroApi
@@ -11,7 +12,7 @@ from .moj_elektro_api import MojElektroApi
 DOMAIN = 'mojelektro'
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(minutes=15)
+SCAN_INTERVAL = timedelta(hours=24)
 
 CONF_METER_ID = 'meter_id'
 
@@ -31,14 +32,12 @@ def setup(hass, config):
 
     conf = config.get(DOMAIN)
 
-    api = MojElektroApi(conf.get(CONF_METER_ID))
-
-    hass.helpers.discovery.load_platform('sensor', DOMAIN, conf, config)
+    api = MojElektroApi(conf.get(CONF_METER_ID), hass)
 
     def refresh(event_time):
         """Refresh"""
         _LOGGER.debug("Refreshing...")
-        hass.data[DOMAIN] = api.getData()
+        api.updateData()
 
     refresh(0)
 
